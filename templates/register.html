@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Create account · Ollama Gateway{% endblock %}
+{% block body_class %}auth-page{% endblock %}
+
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">Identity and access</p>
+  <h1>Create an account</h1>
+  <p class="lede">New accounts start with the user role. An administrator can promote you later.</p>
+  <noscript>
+    <p class="alert">Enable JavaScript to create an account.</p>
+  </noscript>
+  <p id="form-error" class="alert" hidden></p>
+  <form id="register-form">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" required autofocus>
+    <p class="hint">3–32 characters: letters, digits, and underscore.</p>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="6" required>
+    <p class="hint">At least 6 characters.</p>
+    <button class="btn btn-primary" type="submit" id="submit-btn">Create account</button>
+  </form>
+  <p class="switch">Already registered? <a href="/login">Sign in</a></p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const form = document.getElementById("register-form");
+  const submitBtn = document.getElementById("submit-btn");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value;
+    if (!username || !password) {
+      showError("form-error", "Enter both username and password.");
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Creating account...";
+    document.getElementById("form-error").hidden = true;
+    try {
+      const response = await fetch("/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        showError("form-error", detailFrom(data));
+        return;
+      }
+      window.location.href = "/";
+    } catch (error) {
+      showError("form-error", "Could not reach the gateway.");
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Create account";
+    }
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}Home · Ollama Gateway{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <p class="eyebrow">Signed in</p>
+  <h1>Hello, {{ user.username }}</h1>
+  <p class="lede">This gateway checks your token, applies your quota, then forwards <code>/api/*</code> to Ollama at <code>{{ ollama_url }}</code>.</p>
+</section>
+
+<div class="grid">
+  <section class="panel">
+    <h2>Your access</h2>
+    <dl class="facts">
+      <div>
+        <dt>Role</dt>
+        <dd><span class="badge badge-{{ user.role }}">{{ user.role }}</span></dd>
+      </div>
+      <div>
+        <dt>Quota</dt>
+        <dd>{{ rate_limit_requests }} requests / {{ rate_limit_window }}s</dd>
+      </div>
+      <div>
+        <dt>Chat and generate</dt>
+        <dd>Allowed</dd>
+      </div>
+      <div>
+        <dt>Pull, delete, push, copy</dt>
+        <dd>{{ "Allowed" if user.role == "admin" else "Admin only" }}</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="panel">
+    <h2>Try the proxy</h2>
+    <p>Ask the gateway for the model list. The browser sends your login cookie; Ollama never sees it.</p>
+    <button type="button" class="btn btn-primary" id="check-btn">List models</button>
+    <p id="quota-line" class="hint" hidden></p>
+    <pre id="check-output" class="output" hidden></pre>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const button = document.getElementById("check-btn");
+  const output = document.getElementById("check-output");
+  const quotaLine = document.getElementById("quota-line");
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    output.hidden = false;
+    output.textContent = "Contacting Ollama through the gateway...";
+    quotaLine.hidden = true;
+    try {
+      const response = await fetch("/api/tags", { headers: { "Accept": "application/json" } });
+      const data = await readJson(response);
+      const remaining = response.headers.get("x-ratelimit-remaining");
+      const limit = response.headers.get("x-ratelimit-limit");
+      if (remaining !== null && limit !== null) {
+        quotaLine.hidden = false;
+        quotaLine.textContent = "Quota remaining in this window: " + remaining + " of " + limit + ".";
+      }
+      if (!response.ok) {
+        output.textContent = "HTTP " + response.status + ": " + detailFrom(data);
+        return;
+      }
+      const models = Array.isArray(data.models) ? data.models.map((model) => model.name) : [];
+      output.textContent = models.length
+        ? models.join("\n")
+        : "Ollama answered, and no models are installed yet.\n\n" + JSON.stringify(data, null, 2);
+    } catch (error) {
+      output.textContent = "Could not reach the gateway.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+{% endblock %}

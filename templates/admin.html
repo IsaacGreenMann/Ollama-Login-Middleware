@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard · Ollama Gateway{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <p class="eyebrow">Administration</p>
+  <h1>Accounts</h1>
+  <p class="lede">Promotions apply on the next request. Each account can send {{ rate_limit_requests }} API requests every {{ rate_limit_window }} seconds.</p>
+</section>
+
+<p id="form-error" class="alert" hidden></p>
+
+<div class="table-wrap">
+  <table id="user-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Username</th>
+        <th>Role</th>
+        <th>Created (UTC)</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for account in users %}
+      <tr>
+        <td>{{ account.id }}</td>
+        <td>{{ account.username }}</td>
+        <td><span class="badge badge-{{ account.role }}">{{ account.role }}</span></td>
+        <td>{{ account.created_at }}</td>
+        <td class="actions">
+          <button
+            type="button"
+            class="btn btn-small"
+            data-action="role"
+            data-id="{{ account.id }}"
+            data-role="{{ 'user' if account.role == 'admin' else 'admin' }}"
+            {% if account.id == user.id %}disabled title="You cannot change your own role"{% endif %}
+          >{{ "Make user" if account.role == "admin" else "Make admin" }}</button>
+          <button
+            type="button"
+            class="btn btn-danger btn-small"
+            data-action="delete"
+            data-id="{{ account.id }}"
+            data-username="{{ account.username }}"
+            {% if account.id == user.id %}disabled title="You cannot delete your own account"{% endif %}
+          >Delete</button>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="5">No accounts yet.</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function sendAction(url, options) {
+    const response = await fetch(url, options);
+    if (response.ok) {
+      window.location.reload();
+      return;
+    }
+    const data = await readJson(response);
+    showError("form-error", "HTTP " + response.status + ": " + detailFrom(data));
+  }
+
+  document.getElementById("user-table").addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-action]");
+    if (!button || button.disabled) {
+      return;
+    }
+    const userId = button.dataset.id;
+    button.disabled = true;
+    if (button.dataset.action === "delete") {
+      const confirmed = window.confirm("Delete " + button.dataset.username + "? Their token will stop working.");
+      if (!confirmed) {
+        button.disabled = false;
+        return;
+      }
+      await sendAction("/admin/users/" + userId, { method: "DELETE" });
+      button.disabled = false;
+      return;
+    }
+    await sendAction("/admin/users/" + userId + "/role", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ role: button.dataset.role }),
+    });
+    button.disabled = false;
+  });
+</script>
+{% endblock %}

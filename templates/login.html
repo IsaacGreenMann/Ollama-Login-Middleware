@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Sign in · Ollama Gateway{% endblock %}
+{% block body_class %}auth-page{% endblock %}
+
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">Identity and access</p>
+  <h1>Sign in</h1>
+  <p class="lede">Use your gateway account to reach the local Ollama API.</p>
+  <noscript>
+    <p class="alert">Enable JavaScript. The form signs in through the JSON API and stores the session in an HTTP-only cookie.</p>
+  </noscript>
+  <p id="form-error" class="alert" hidden></p>
+  <form id="login-form">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button class="btn btn-primary" type="submit" id="submit-btn">Sign in</button>
+  </form>
+  <p class="switch">No account yet? <a href="/register">Create one</a></p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const form = document.getElementById("login-form");
+  const submitBtn = document.getElementById("submit-btn");
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value;
+    if (!username || !password) {
+      showError("form-error", "Enter both username and password.");
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Signing in...";
+    document.getElementById("form-error").hidden = true;
+    try {
+      const response = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await readJson(response);
+      if (!response.ok) {
+        showError("form-error", detailFrom(data));
+        return;
+      }
+      window.location.href = data.user.role === "admin" ? "/admin" : "/";
+    } catch (error) {
+      showError("form-error", "Could not reach the gateway.");
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Sign in";
+    }
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}Forbidden · Ollama Gateway{% endblock %}
+
+{% block content %}
+<section class="auth-card forbidden-card">
+  <p class="eyebrow">403</p>
+  <h1>Administrators only</h1>
+  <p class="lede">The account <strong>{{ user.username }}</strong> has the <span class="badge badge-user">user</span> role, so the dashboard is closed.</p>
+  <p><a class="btn btn-primary" href="/">Back home</a></p>
+</section>
+{% endblock %}

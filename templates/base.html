@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Ollama Gateway{% endblock %}</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23121410'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23c4f04d'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="logo" aria-hidden="true"></span>
+      <span>Ollama Gateway</span>
+    </a>
+    <nav class="nav">
+      {% if user %}
+        <a href="/">Home</a>
+        {% if user.role == "admin" %}
+          <a href="/admin">Dashboard</a>
+        {% endif %}
+        <span class="who"><span class="badge badge-{{ user.role }}">{{ user.role }}</span> {{ user.username }}</span>
+        <button type="button" class="btn btn-ghost btn-small" id="logout-btn">Log out</button>
+      {% else %}
+        <a href="/login">Sign in</a>
+        <a href="/register">Register</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    async function readJson(response) {
+      const text = await response.text();
+      if (!text) {
+        return {};
+      }
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        return { detail: text };
+      }
+    }
+
+    function detailFrom(data) {
+      if (!data || data.detail == null) {
+        return "Request failed.";
+      }
+      if (typeof data.detail === "string") {
+        return data.detail;
+      }
+      if (Array.isArray(data.detail)) {
+        return data.detail.map((item) => item.msg || String(item)).join(" ");
+      }
+      return "Request failed.";
+    }
+
+    function showError(id, message) {
+      const el = document.getElementById(id);
+      if (!el) {
+        return;
+      }
+      el.hidden = false;
+      el.textContent = message;
+    }
+
+    const logoutBtn = document.getElementById("logout-btn");
+    if (logoutBtn) {
+      logoutBtn.addEventListener("click", async () => {
+        logoutBtn.disabled = true;
+        await fetch("/logout", { method: "POST" });
+        window.location.href = "/login";
+      });
+    }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
