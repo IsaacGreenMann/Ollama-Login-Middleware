@@ -1,174 +1,282 @@
 # Ollama IAM Gateway
 
-This project is an identity and access management gateway for a local [Ollama](https://ollama.com) server. It is the Part 4 extension for CS411: a Python service that sits in front of Ollama, signs users in, and only then forwards API calls. Ollama itself is not modified. After a user is authenticated, a small per-user rate limiter applies a quota so the gateway can hand a stable user identity to a fuller rate-limiting or backpressure extension.
+> CS411 Software Architecture Design — Project #1, Part 4  
+> Bilkent University, 2026–2027 Fall
 
-## Architecture
+An identity and access management (IAM) reverse-proxy gateway for [Ollama](https://ollama.com). The gateway sits in front of a local Ollama server, authenticates users via JWT, enforces role-based access control, and applies per-user rate limiting — then forwards admitted requests to Ollama. Ollama itself is never modified.
 
-Browsers and API clients talk to this gateway (port 8080). The gateway stores accounts in SQLite, checks passwords with bcrypt, and issues a signed JWT. The browser keeps that token in an HTTP-only cookie. Scripts can send the same token as `Authorization: Bearer <token>`.
-
-A request to `/api/*` then walks a fixed pipeline:
-
-1. **Authenticate.** The JWT is verified and the account is loaded from the database. The role inside the token is not trusted, so a demotion applies on the next call.
-2. **Authorize.** Every signed-in role may call chat, generate, and the other ordinary Ollama routes. `POST /api/pull`, `/api/delete`, `/api/push`, and `/api/copy` require the `admin` role.
-3. **Rate limit.** An in-memory sliding window allows 30 requests per 60 seconds for that user (both numbers are configurable). Over the limit, the gateway returns `429` and `Retry-After` without contacting Ollama.
-4. **Proxy.** The call is streamed to Ollama at `http://127.0.0.1:11434`. Generate and chat responses are newline-delimited JSON and are forwarded chunk by chunk.
+## Architecture Overview
 
 ```
-Browser or API client
-        |
-        v
-Ollama IAM Gateway :8080
-  authenticate -> authorize -> rate limit -> proxy
-        |
-        v
-Ollama :11434
+Browser / CLI / API Client
+            │
+            ▼
+  ┌─────────────────────────┐
+  │  IAM Gateway  :8080     │
+  │                         │
+  │  1. Authenticate (JWT)  │──── 401 Unauthenticated
+  │  2. Authorize  (RBAC)   │──── 403 Forbidden
+  │  3. Rate Limit (per-user)│──── 429 Too Many Requests
+  │  4. Proxy (stream)      │
+  └────────────┬────────────┘
+               ▼
+       Ollama Server  :11434
+               │
+      Scheduler → Runner → Inference Engine
 ```
 
-Pages (`/login`, `/register`, `/`, `/admin`) are Jinja templates served by the same FastAPI app. They are not proxied to Ollama.
+The gateway intercepts every `/api/*` request and runs a three-stage security pipeline before forwarding it to Ollama:
 
-The in-memory limiter is intentionally small. It exists to show the integration point: the quota key is the authenticated user id. Replacing `SlidingWindowRateLimiter` does not require a change to login or to the proxy.
+1. **Authentication** — Extracts the JWT from the `Authorization: Bearer` header or from the HTTP-only cookie. Verifies the signature (HMAC-SHA256), checks expiration, and reloads the user's current role from the database on every request.
+2. **Authorization** — Chat and generate endpoints are open to all authenticated users. Model management operations (pull, delete, push, copy) require the `admin` role.
+3. **Rate Limiting** — An in-memory sliding-window limiter enforces a per-user quota (default: 30 requests / 60 seconds). Over the limit, the gateway returns HTTP 429 with a `Retry-After` header without contacting Ollama.
+
+Admitted requests are streamed to Ollama using an async HTTP client (httpx). Responses from `/api/generate` and `/api/chat` are newline-delimited JSON and are forwarded chunk-by-chunk — the gateway never buffers the full response.
+
+Web pages (`/login`, `/register`, `/`, `/admin`) are Jinja2 templates served by the same FastAPI process. They are not proxied to Ollama.
 
 ## Prerequisites
 
-- Python 3.10 or newer
-- Ollama installed locally and running (`ollama serve`, which listens on port 11434)
+- **Python 3.10** or newer
+- **Ollama** installed and running locally (`ollama serve` on port 11434)
 
-The gateway still starts if Ollama is down. API calls then return `502` until Ollama is available. Login and the admin dashboard do not need Ollama.
+> The gateway starts even if Ollama is down. Login, registration, and the admin dashboard work independently. API calls return `502 Bad Gateway` until Ollama is available.
 
 ## Installation
 
-From the `ollama-iam` directory:
-
 ```bash
+cd ollama-iam
 python -m venv .venv
 ```
 
-Windows PowerShell:
+Activate the virtual environment:
 
 ```powershell
+# Windows PowerShell
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 ```
-
-macOS or Linux:
 
 ```bash
+# macOS / Linux
 source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-## How to run
+## How to Run
 
-Still inside `ollama-iam`, with the virtual environment active and Ollama already serving:
+With the virtual environment active and Ollama serving:
 
 ```bash
 uvicorn main:app --reload --port 8080
 ```
 
-Open [http://127.0.0.1:8080/login](http://127.0.0.1:8080/login). Interactive API docs are at [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs).
+Open **http://127.0.0.1:8080/login** in a browser. Interactive API docs: **http://127.0.0.1:8080/docs**.
 
-On the first launch, if `iam.db` has no users, the process creates the default administrator and prints the username and password. It also writes a JWT signing key to `.jwt_secret` when `JWT_SECRET` is not set. Both files are local and are listed in `.gitignore`.
+On first launch, if the database is empty, the gateway:
+- Creates a default administrator account and prints the credentials to the console.
+- Generates a JWT signing key and saves it to `.jwt_secret`.
 
-Optional environment variables:
+### Default Credentials
+
+| Username | Password | Role  |
+|----------|----------|-------|
+| `admin`  | `admin`  | admin |
+
+New accounts created via `/register` are assigned the `user` role. An admin can promote other users from the dashboard. The signed-in admin cannot delete or demote their own account, and the last remaining admin cannot be removed.
+
+## Configuration
+
+All settings are optional and have working defaults for local development.
 
 | Variable | Default | Purpose |
-| --- | --- | --- |
-| `JWT_SECRET` | contents of `.jwt_secret` | HMAC secret for access tokens. Use at least 32 characters if you set it yourself |
+|---|---|---|
+| `JWT_SECRET` | auto-generated in `.jwt_secret` | HMAC signing key for tokens (use ≥32 characters if you set it yourself) |
 | `JWT_EXPIRE_HOURS` | `24` | Token and cookie lifetime |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Upstream Ollama API |
-| `DATABASE_PATH` | `iam.db` in this directory | SQLite file |
-| `RATE_LIMIT_REQUESTS` | `30` | Requests allowed per window |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window length |
-| `COOKIE_SECURE` | `false` | Set `true` only behind HTTPS |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Upstream Ollama address |
+| `DATABASE_PATH` | `iam.db` (project directory) | SQLite database file |
+| `RATE_LIMIT_REQUESTS` | `30` | Max requests per window |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window duration |
+| `COOKIE_SECURE` | `false` | Set `true` when behind HTTPS |
 
-PowerShell example:
+## API Endpoints
 
-```powershell
-$env:JWT_SECRET = "replace-me"
-$env:RATE_LIMIT_REQUESTS = "30"
-uvicorn main:app --reload --port 8080
-```
+### Public (no authentication)
 
-## Default credentials
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/login` | Login page |
+| `GET` | `/register` | Registration page |
+| `POST` | `/login` | Authenticate and receive a JWT |
+| `POST` | `/register` | Create account and receive a JWT |
+| `POST` | `/logout` | Clear the authentication cookie |
 
-When the database is empty at startup the gateway inserts:
+### Authenticated (valid JWT required)
 
-- username: `admin`
-- password: `admin`
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Home page (shows user info) |
+| `GET` | `/me` | Current user as JSON |
+| `*` | `/api/*` | Proxied to Ollama |
 
-That password is for a local demo. Registration creates accounts with the `user` role only. Promote another administrator from the dashboard before deleting the original admin. The signed-in admin cannot delete or demote their own account, and the last remaining admin cannot be removed.
+### Admin only
 
-## API endpoints
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/admin` | User management dashboard |
+| `GET` | `/admin/users` | JSON list of all accounts |
+| `PUT` | `/admin/users/{id}/role` | Change role: `{"role": "admin"}` or `{"role": "user"}` |
+| `DELETE` | `/admin/users/{id}` | Delete an account |
 
-| Method | Path | Auth | Description |
-| --- | --- | --- | --- |
-| `GET` | `/login` | No | Login page |
-| `GET` | `/register` | No | Registration page |
-| `POST` | `/register` | No | Create a `user` account, set the cookie, and return a JWT |
-| `POST` | `/login` | No | Check the password, set the cookie, and return a JWT |
-| `POST` | `/logout` | No | Clear the cookie |
-| `GET` | `/me` | Yes | Current username, role, and id |
-| `GET` | `/` | Yes | Home page |
-| `GET` | `/admin` | Admin | Dashboard page. Other roles get the 403 page |
-| `GET` | `/admin/users` | Admin | JSON list of accounts |
-| `PUT` | `/admin/users/{id}/role` | Admin | Body `{"role": "admin"}` or `{"role": "user"}` |
-| `DELETE` | `/admin/users/{id}` | Admin | Delete an account |
-| `*` | `/api/*` | Yes | Proxied to Ollama. Pull, delete, push, and copy require admin |
+### Ollama proxy (admin-restricted operations)
 
-Login and register return JSON of the form:
+| Endpoint | All users | Admin only |
+|---|---|---|
+| `/api/chat`, `/api/generate` | ✓ | ✓ |
+| `/api/tags`, `/api/show` | ✓ | ✓ |
+| `/api/pull`, `/api/push` | ✗ | ✓ |
+| `/api/delete`, `/api/copy` | ✗ | ✓ |
+
+### Response format
+
+Login and register return:
 
 ```json
 {
   "access_token": "<jwt>",
   "token_type": "bearer",
-  "user": {"id": 1, "username": "admin", "role": "admin", "created_at": "2026-10-25 00:00:00"}
+  "user": {
+    "id": 1,
+    "username": "admin",
+    "role": "admin",
+    "created_at": "2026-10-25 00:00:00"
+  }
 }
 ```
 
 The same token is set as the `access_token` cookie (`HttpOnly`, `SameSite=Lax`).
 
-Common status codes: `401` missing or bad token, `403` role denied, `409` username taken, `422` invalid form body, `429` quota exceeded (`Retry-After` is set), `502` Ollama is not running, `504` Ollama timed out. Successful proxied responses also include `X-RateLimit-Limit` and `X-RateLimit-Remaining`.
+Status codes: `401` invalid/missing token · `403` insufficient role · `409` username taken · `422` invalid body · `429` rate limit exceeded (includes `Retry-After`) · `502` Ollama unreachable · `504` Ollama timeout.
 
-Example calls from PowerShell. `curl.exe` is Windows' curl, not the `Invoke-WebRequest` alias:
+Proxied responses include `X-RateLimit-Limit` and `X-RateLimit-Remaining` headers.
 
-```powershell
-curl.exe -s -X POST http://127.0.0.1:8080/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}'
+## Demo Walkthrough
 
-curl.exe -s http://127.0.0.1:8080/api/tags -H "Authorization: Bearer TOKEN"
+On Windows PowerShell, use `curl.exe` so the shell does not call `Invoke-WebRequest`.
 
-curl.exe -N -X POST http://127.0.0.1:8080/api/generate -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d '{"model":"llama3.2","prompt":"Hello","stream":true}'
+**1. Login**
+
+```bash
+curl.exe -s -X POST http://127.0.0.1:8080/login \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"admin\",\"password\":\"admin\"}"
 ```
 
-`-N` disables curl's buffer so a streaming generate response prints as Ollama produces it.
+Save the returned `access_token` as `TOKEN`.
 
-## Project layout
+**2. List models (authenticated)**
+
+```bash
+curl.exe -s http://127.0.0.1:8080/api/tags \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**3. Chat with a model**
+
+```bash
+curl.exe -N -X POST http://127.0.0.1:8080/api/chat \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"llama3.2\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+```
+
+**4. Rejected without a token**
+
+```bash
+curl.exe -s http://127.0.0.1:8080/api/tags
+# → 401 {"detail": "Authentication required."}
+```
+
+**5. Rate limit exceeded**
+
+Send 31 rapid requests and the 31st returns:
+
+```
+HTTP 429 {"detail": "Rate limit exceeded for this user."}
+Retry-After: <seconds>
+```
+
+## Project Structure
 
 ```
 ollama-iam/
-├── main.py                 # App startup, static files, middleware
-├── config.py               # Environment-backed settings
-├── database.py             # SQLite user table and queries
-├── auth.py                 # bcrypt, JWT, current-user dependency
-├── rate_limiter.py         # Per-user sliding window
-├── middleware.py           # Authenticate, authorize, rate limit /api/*
+├── main.py                 # App entry point, lifespan, middleware registration
+├── config.py               # Environment-backed settings with defaults
+├── database.py             # SQLite schema and user CRUD operations
+├── auth.py                 # bcrypt hashing, JWT sign/verify, FastAPI auth dependencies
+├── rate_limiter.py         # In-memory per-user sliding-window rate limiter
+├── middleware.py            # ASGI middleware: auth → authz → rate limit on /api/*
+├── requirements.txt        # pip dependencies
+│
 ├── routes/
-│   ├── auth_routes.py      # Login, register, logout, /me, home
-│   ├── admin_routes.py     # Dashboard and user administration
-│   └── proxy_routes.py     # Streaming reverse proxy
-├── templates/              # Login, register, home, admin, 403
-└── static/style.css
+│   ├── __init__.py
+│   ├── auth_routes.py      # /login, /register, /logout, /me, /
+│   ├── admin_routes.py     # /admin dashboard and user management API
+│   └── proxy_routes.py     # Streaming reverse proxy to Ollama
+│
+├── templates/
+│   ├── base.html           # Shared HTML layout
+│   ├── login.html          # Login form
+│   ├── register.html       # Registration form
+│   ├── home.html           # Post-login landing page
+│   ├── admin.html          # Admin user management table
+│   └── forbidden.html      # 403 error page
+│
+├── static/
+│   └── style.css           # Dark-themed UI stylesheet
+│
+├── screenshots/            # UI captures for the report
+├── .jwt_secret             # Auto-generated signing key (gitignored)
+├── iam.db                  # SQLite database (gitignored, created at runtime)
+└── .gitignore
 ```
+
+## Security Measures
+
+- **Passwords** are hashed with bcrypt before storage. Plaintext is never written to the database.
+- **Timing-attack resistance** — Failed logins for nonexistent usernames still run a bcrypt comparison against a dummy hash, so response time does not reveal whether an account exists.
+- **JWT algorithm pinned to HS256** — The accepted algorithm list is explicit, blocking `alg=none` signature-bypass attacks.
+- **Signing key not hardcoded** — Generated once with `secrets.token_urlsafe(48)` and saved to `.jwt_secret`. Overridable via the `JWT_SECRET` environment variable.
+- **HTTP-only cookies** — The browser cannot read the token via JavaScript, mitigating XSS-based token theft.
+- **Role reloaded from database** — The role stored in the JWT is not trusted for authorization. The user's current role is read from SQLite on every request, so a demotion takes effect immediately.
+
+## Integration with Part 3
+
+The IAM module and the rate-limiting extension (Part 3) are designed to compose:
+
+| Concern | Part 4 (IAM) | Part 3 (Rate Limiting) |
+|---|---|---|
+| Question it answers | *Who is making this request?* | *How much capacity may they consume?* |
+| Mechanism | JWT authentication + RBAC | Sliding-window admission control |
+| Key insight | Provides a verified user identity | Uses that identity for per-user quotas |
+
+Without authentication, the rate limiter would fall back to IP-based identification, which is coarse (users behind the same NAT share a quota) and easy to bypass. With authentication, each account has its own independent quota. The `SlidingWindowRateLimiter` class can be replaced by a more advanced backpressure system without changing the authentication or proxy layers.
 
 ## Screenshots
 
-Placeholder: add captures of the login page, the registration page, the home page, and the admin dashboard here.
-
-<!--
 ![Login](screenshots/login.png)
+
 ![Register](screenshots/register.png)
+
 ![Home](screenshots/home.png)
+
 ![Admin dashboard](screenshots/admin.png)
--->
+
+![Forbidden for non-admin](screenshots/forbidden.png)
 
 ## Limitations
 
